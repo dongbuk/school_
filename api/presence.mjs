@@ -56,11 +56,19 @@ export default async function handler(req, res) {
   const cookie = (req.headers.cookie || '').match(/(?:^|;\s*)school_session=([a-f0-9-]{36})(?:;|$)/);
   const id = cookie?.[1] || randomUUID();
   const publicId = createHash('sha256').update(id).digest('hex');
+  let stage = 'connect';
   try {
     const response = await fetch(url, {method:'POST', headers:{Authorization:`Bearer ${token}`, 'Content-Type':'application/json'}, body:JSON.stringify(['EVAL',syncScript,'1',key,publicId,body.action === 'leave' ? 'leave' : JSON.stringify(body)]), signal:AbortSignal.timeout(5000)});
-    if (!response.ok) throw Error('storage');
+    if (!response.ok) { console.error('Upstash HTTP status:', response.status); throw Error('http'); }
+    stage = 'response';
     const result = await response.json();
-    if (result.error) throw Error('storage');
+    if (result.error) {
+      const message=String(result.error);
+      const category=/auth|token|unauthori/i.test(message)?'authentication':/command|script|eval/i.test(message)?'redis-command':'redis-error';
+      console.error('Upstash error category:', category);
+      throw Error('redis');
+    }
+    stage = 'parse-result';
     if (result.result === 'FULL') return res.status(409).json({error:'현재 33명이 탐험 중이에요. 잠시 후 다시 입장해 주세요.'});
     res.setHeader('Set-Cookie', `school_session=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${process.env.VERCEL ? '; Secure' : ''}`);
     const players = body.action === 'leave' ? [] : JSON.parse(result.result).map(value => {
@@ -68,5 +76,8 @@ export default async function handler(req, res) {
       return player;
     });
     return res.status(200).json({id:publicId, players, count:players.length, capacity:33});
-  } catch { return res.status(503).json({error:'연결이 잠시 끊겼어요. 다시 연결 중입니다.'}); }
+  } catch (error) {
+    console.error('Presence failure:', stage, error.name);
+    return res.status(503).json({error:'연결이 잠시 끊겼어요. 다시 연결 중입니다.'});
+  }
 }
